@@ -1,0 +1,9 @@
+wsls:
+  - name: basic
+    image: alexchiri.azurecr.io/basic:1
+    windowsTerminalProfileId: 6685a834-a551-4db7-9d79-77ac218585cd
+acr:
+  username: bla
+  password: bla
+  tenant: bla
+
