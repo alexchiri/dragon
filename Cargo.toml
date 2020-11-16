@@ -1,17 +1,16 @@
 [package]
 name = "dragon"
 version = "0.1.0"
-description = "A CLI tool that manages project-dev-palace WSL2 VMs."
+description = "A CLI tool that manages Docker generated WSL2 VMs and Windows Terminal profiles."
 authors = ["Alexandru Chiritescu <alex@alexchiri.com>"]
 edition = "2018"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 structopt = "0.3.20"
-serde = "1.0.117"
+serde = { version = "1.0.117", features = ["derive"] }
 serde_yaml = "0.8.14"
-anyhow = "1.0.33"
+anyhow = "1.0.34"
 clap-verbosity-flag = "0.3.1"
 simple_logger = "1.11.0"
 log = "0.4.11"
+regex = "1.4.2"
