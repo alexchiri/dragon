@@ -124,6 +124,9 @@ fn handle_pull(pull: Pull) -> Result<()> {
 
         let latest_tag_str = latest_tag.as_str();
         if wsl_conf.latest.is_none() || wsl_conf.latest.as_ref().unwrap() != latest_tag_str {
+            pull_latest_image_tag(registry_name, repository_name, latest_tag_str, acr_conf.username.as_str(), acr_conf.password.as_str())
+                .with_context(|| format!("An error ocurred while pulling image from registry!"))?;
+
             wsl_conf.latest = Option::from(String::from(latest_tag_str));
             println!("WSL config with name `{}` has been updated with the new latest tag `{}` in .dockerwsl file `{}`.", &wsl_conf.name, latest_tag_str, &dockerwsl_path.to_str().unwrap());
         }
@@ -140,6 +143,35 @@ fn handle_pull(pull: Pull) -> Result<()> {
 
 fn handle_upgrade(upgrade: Upgrade) -> Result<()> {
 
+    Ok(())
+}
+
+fn pull_latest_image_tag(registry_name: &str, repository_name: &str, tag: &str, username: &str, password: &str) -> Result<()> {
+    let registry_url = format!("{}.azurecr.io", registry_name);
+    let registry_url_str = registry_url.as_str();
+
+    let mut docker_login_command = Command::new(r#"docker"#);
+    docker_login_command.args(&["login", registry_url_str])
+                    .args(&["--username", username])
+                    .args(&["--password", password]);
+
+    let docker_login_command_status = docker_login_command.status()
+        .with_context(|| format!("`docker login {}` failed!", registry_url_str))?;
+    if !docker_login_command_status.success() {
+        return Err(anyhow::anyhow!("`docker login {}` failed. Double-check the service principal details in `.dockerwsl`!", registry_url_str));
+    }
+
+    let image_url = format!("{}/{}:{}", registry_url, repository_name, tag);
+    let image_url_str = image_url.as_str();
+    let mut docker_pull_command = Command::new(r#"docker"#);
+    docker_pull_command.args(&["pull", image_url_str]);
+
+    let docker_pull_command_status = docker_pull_command.status()
+        .with_context(|| format!("`docker pull {}` failed!", image_url_str))?;
+    if !docker_pull_command_status.success() {
+        return Err(anyhow::anyhow!("`docker pull {}` failed!", image_url_str));
+    }
+    
     Ok(())
 }
 
@@ -207,9 +239,9 @@ fn write_dockerwsl_file(file_path: &PathBuf, dockerwsl_conf: &DockerWSLConf) -> 
 fn az_login(username: &str, password: &str, tenant: &str) -> Result<()> {
     let mut az_login_command = Command::new(r#"C:\Program Files (x86)\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"#);
     az_login_command.args(&["login", "--service-principal"])
-                                    .args(&["--username", username])
-                                    .args(&["--password", password])
-                                    .args(&["--tenant", tenant]);
+                    .args(&["--username", username])
+                    .args(&["--password", password])
+                    .args(&["--tenant", tenant]);
 
     let az_login_command_status = az_login_command.status()
         .with_context(|| format!("`az login --service-principal` failed!"))?;
@@ -225,11 +257,11 @@ fn get_latest_tag(registry_name:&str, repository_name: &str, username: &str, pas
     
     let mut az_get_latest_tag_command = Command::new(r#"C:\Program Files (x86)\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"#);
     az_get_latest_tag_command.args(&["acr", "repository", "show-manifests"])
-                                .args(&["-n", registry_name])
-                                .args(&["--repository", repository_name])
-                                .args(&["--orderby", "time_desc"])
-                                .args(&["--top", "1"])
-                                .args(&["--query", "[0].tags[0]"]);
+                             .args(&["-n", registry_name])
+                             .args(&["--repository", repository_name])
+                             .args(&["--orderby", "time_desc"])
+                             .args(&["--top", "1"])
+                             .args(&["--query", "[0].tags[0]"]);
     let az_get_latest_tag_command_output = az_get_latest_tag_command.output()
         .with_context(|| format!("Failed to retrieve the latest tag for {}.azurecr.io/{}!", registry_name, repository_name))?;
     
