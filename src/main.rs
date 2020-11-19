@@ -1,14 +1,14 @@
-use std::path::{PathBuf, Path};
+use std::path::PathBuf;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter};
-use std::process::{Command, ExitStatus};
+use std::process::Command;
 
 use structopt::StructOpt;
 use anyhow::{Context, Result};
-use log::{info, warn, debug, trace};
-use simple_logger::{SimpleLogger};
-use serde_yaml::Value;
+use log::debug;
+use simple_logger::SimpleLogger;
 use serde::{Serialize, Deserialize};
+use json_comments::StripComments;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "dragon", about = "A CLI tool that manages Docker generated WSL2 VMs and Windows Terminal profiles.")]
@@ -69,7 +69,7 @@ struct WSLConf {
     name: String,
     image: String,
     latest: Option<String>,
-    windowsTerminalProfileId: String
+    windowsTerminalProfileId: Option<String>
 }
 
 fn main() -> Result<()> {
@@ -93,7 +93,7 @@ fn main() -> Result<()> {
 }
 
 fn handle_pull(pull: Pull) -> Result<()> {
-    let dockerwsl_path = PathBuf::from(pull.dockerwsl);
+    let dockerwsl_path = pull.dockerwsl;
     
     let mut dockerwsl_content = parse_dockerwslconf_file(&dockerwsl_path)
         .with_context(|| format!("Could not parse `.dockerwsl` config file `{:#?}`!", &dockerwsl_path))?;
@@ -101,7 +101,7 @@ fn handle_pull(pull: Pull) -> Result<()> {
     let pull_wsl = &pull.wsl;
     let acr_conf = &dockerwsl_content.acr;
 
-    for mut wsl_conf in dockerwsl_content.wsls.iter_mut() {
+    for wsl_conf in dockerwsl_content.wsls.iter_mut() {
         match pull_wsl {
             Some(name) => {
                 if name.ne(&wsl_conf.name) {
@@ -114,23 +114,14 @@ fn handle_pull(pull: Pull) -> Result<()> {
             None => { debug!("No wsl name passed to `pull`, will pull all wsls in the config file!"); }
         }
 
-        let (registry_name, repository_name, tag) = extract_image_details(&wsl_conf.image).unwrap();
+        let (registry_name, repository_name, tag) = extract_image_details(wsl_conf.image.as_str()).unwrap();
 
-        let latest_tag = get_latest_tag(registry_name, 
-                                                repository_name, 
-                                                acr_conf.username.as_str(), 
-                                                acr_conf.password.as_str(), 
-                                                acr_conf.tenant.as_str()).with_context(|| format!(""))?;
-
-        let latest_tag_str = latest_tag.as_str();
-        if wsl_conf.latest.is_none() || wsl_conf.latest.as_ref().unwrap() != latest_tag_str {
-            pull_latest_image_tag(registry_name, repository_name, latest_tag_str, acr_conf.username.as_str(), acr_conf.password.as_str())
-                .with_context(|| format!("An error ocurred while pulling image from registry!"))?;
-
-            wsl_conf.latest = Option::from(String::from(latest_tag_str));
-            println!("WSL config with name `{}` has been updated with the new latest tag `{}` in .dockerwsl file `{}`.", &wsl_conf.name, latest_tag_str, &dockerwsl_path.to_str().unwrap());
-        }
-
+        handle_pull_for_image(registry_name.as_str(), 
+                              repository_name.as_str(), 
+                              acr_conf.username.as_str(), 
+                              acr_conf.password.as_str(), 
+                              acr_conf.tenant.as_str(), 
+                              wsl_conf).with_context(|| format!("Could not handle pull for WSL `{}`!", &wsl_conf.name))?;
         
         //  debug!("{:#?}",az_login_command_status); 
     }
@@ -141,7 +132,163 @@ fn handle_pull(pull: Pull) -> Result<()> {
     Ok(())
 }
 
+fn extract_image_details(image_url: &str) -> Result<(String, String, String)> {
+    let regex = regex::Regex::new(r"(.+?)\.azurecr\.io/(.+?):(.+?)").unwrap();
+    let image_regex_captures = regex.captures(image_url)
+        .with_context(|| format!("Docker image property does not have the expected format `registry.azurecr.io/repository:tag`!"))?;
+
+    let registry_name = image_regex_captures.get(1)
+        .with_context(|| format!("Could not extract registry name from Docker image URL `{}`!", image_url))?
+        .as_str();
+    let repository_name = image_regex_captures.get(2)
+        .with_context(|| format!("Could not extract repository name from Docker image URL `{}`!", image_url))?
+        .as_str();
+    let tag = image_regex_captures.get(3)
+        .with_context(|| format!("Could not extract tag from Docker image URL `{}`!", image_url))?
+        .as_str();
+
+    Ok((String::from(registry_name), String::from(repository_name), String::from(tag)))
+}
+
+fn handle_pull_for_image(registry_name: &str, repository_name: &str, username: &str, password: &str, tenant: &str, wsl_conf: &mut WSLConf) -> Result<String> {
+    let latest_tag = get_latest_tag(registry_name, repository_name, username, password, tenant)
+        .with_context(|| format!("Could not get latest tag for repository {}.azurecr.io/{}", registry_name, repository_name))?;
+
+    let latest_tag_str = latest_tag.as_str();
+    if wsl_conf.latest.is_none() || wsl_conf.latest.as_ref().unwrap() != latest_tag_str {
+        pull_latest_image_tag(registry_name, repository_name, latest_tag_str, username, password)
+            .with_context(|| format!("An error ocurred while pulling image from registry!"))?;
+
+        wsl_conf.latest = Option::from(String::from(latest_tag_str));
+        println!("WSL config with name `{}` will be updated with the new latest tag `{}` in .dockerwsl file.", &wsl_conf.name, latest_tag_str);
+    }
+
+    Ok(latest_tag)
+}
+
 fn handle_upgrade(upgrade: Upgrade) -> Result<()> {
+    let mut dockerwsl_content = parse_dockerwslconf_file(&upgrade.dockerwsl)
+        .with_context(|| format!("Could not parse `.dockerwsl` config file `{:#?}`!", &upgrade.dockerwsl))?;
+
+    let upgrade_wsl = &upgrade.wsl;
+    let acr_conf = &dockerwsl_content.acr;
+
+    for mut wsl_conf in dockerwsl_content.wsls.iter_mut() {
+        match upgrade_wsl {
+            Some(name) => {
+                if name.ne(&wsl_conf.name) {
+                    debug!("Passed wsl name (`{}`) doesn't match current config entry name, will SKIP it!", &name);
+                    continue;
+                } else {
+                    debug!("Passed wsl name (`{}`) matches current config entry name, will process it!", &name);
+                }
+            },
+            None => { debug!("No wsl name passed to `upgrade`, will upgrade all wsls in the config file!"); }
+        }
+
+        let (registry_name, repository_name, tag) = extract_image_details(&wsl_conf.image).unwrap();
+
+        if wsl_conf.latest.is_none() {
+            handle_pull_for_image(registry_name.as_str(), 
+                repository_name.as_str(), 
+                acr_conf.username.as_str(), 
+                acr_conf.password.as_str(), 
+                acr_conf.tenant.as_str(), 
+                wsl_conf).with_context(|| format!("Could not handle pull for WSL `{}`!", &wsl_conf.name))?;
+        } 
+
+        let latest_tag = wsl_conf.latest.as_ref().unwrap();
+        // Steps
+        // 1. Create/Check if WSL VM with name_latest_tag exists
+        let wsl_vm_name = format!("{}-{}", &wsl_conf.name, latest_tag.as_str());
+        create_wsl_vm(registry_name.as_str(), repository_name.as_str(), &wsl_conf.name, latest_tag.as_str())
+            .with_context(|| format!("Could not create WSL VM for WSL `{}` and tag `{}`", &wsl_conf.name, &tag))?;
+
+        if wsl_conf.windowsTerminalProfileId.is_none() {
+            wsl_conf.windowsTerminalProfileId = Option::from(uuid::Uuid::new_v4().to_hyphenated().to_string());
+        }
+
+        let wt_profile_guid = wsl_conf.windowsTerminalProfileId.as_ref().with_context(|| format!("Unexpected error occurred, a UUID should've been allocated for the `{}` Windows Terminal profile!", &wsl_conf.name))?;
+
+        // 2. Create/Update profile in Windows Terminal settings file
+        create_windows_terminal_profile(&upgrade.wtconfig, wt_profile_guid.as_str(), &wsl_conf.name, wsl_vm_name.as_str())
+            .with_context(|| format!("Could not create/update windows terminal profile for WSL `{}`!", &wsl_conf.name))?;
+        // 3. Update image url and profile GUID in .dockerwsl conf with the latest tag
+        update_wsl_info(&upgrade.dockerwsl, &wsl_conf.name, wt_profile_guid.as_str(), latest_tag.as_str())
+            .with_context(|| format!("Could not update WSL information after upgrading WSL `{}`", &wsl_conf.name))?;
+        //  debug!("{:#?}",az_login_command_status); 
+    }
+
+    write_dockerwsl_file(&upgrade.dockerwsl, &dockerwsl_content)
+        .with_context(|| format!("An error occurred while writing to the .dockerwsl file the updates from the pull subcommand!"))?;
+
+    
+    Ok(())
+}
+
+fn update_wsl_info(dockerwsl_path: &PathBuf, wsl_name: &str, wt_profile_guid: &str, latest_tag: &str) -> Result<()> {
+    
+    Ok(())
+}
+
+fn create_wsl_vm(registry_name: &str, repository_name: &str, wsl_name: &str, tag: &str) -> Result<()> {
+
+    Ok(())
+}
+
+
+fn create_windows_terminal_profile(windows_terminal_config_path: &PathBuf, wt_profile_guid: &str, wsl_name: &str) -> Result<()> {
+    let mut wt_config_content = parse_json_file_without_comments(windows_terminal_config_path)
+        .with_context(|| format!("Could not parse Window Terminal settings file `{:#?}`!", windows_terminal_config_path))?;
+    
+    let wt_profiles = wt_config_content.get_mut("profiles")
+        .with_context(|| format!("Windows Terminal settings file `{:#?}` doesn't have a `profiles` property!", windows_terminal_config_path))?;
+  
+    let wt_profiles_list = wt_profiles.get_mut("list")
+        .with_context(|| format!("Windows Terminal settings file `{:#?}` doesn't have a `profiles.list` property!", windows_terminal_config_path))?;
+
+    let wt_profiles_list_array = wt_profiles_list.as_array_mut()
+        .with_context(|| format!("Syntax incorrect for `profiles.list` array property in Windows Terminal settings file `{:#?}`", windows_terminal_config_path))?;
+
+    let wt_profiles_list_array_filter = |profile: &&mut serde_json::Value| {
+        let profile_object = profile.as_object();
+        match profile_object {
+            Some(p_obj) => {
+                let guid = p_obj.get("guid");
+                match guid {
+                    Some(guid_value) => {
+                        if guid_value.is_string() && guid_value.as_str().unwrap() == wt_profile_guid {
+                            return true;
+                        } else {
+                            return false;
+                        }
+                    },
+                    None => { return false; }
+                }
+            },
+            None => { return false; }
+        }
+    };
+
+    let wt_profile = wt_profiles_list_array.iter_mut().find(wt_profiles_list_array_filter);
+    
+    match wt_profile {
+        Some(profile) => { },
+        None => {
+            let profile_object= serde_json::json!(
+            {
+                "guid": format!("{{{}}}", wt_profile_guid),
+                "hidden": false,
+                "name": wsl_name,
+                "commandLine": format!("dragon run -w {}", wsl_name)
+            });
+
+            wt_profiles_list_array.insert(0, profile_object);
+        }
+    }
+
+    write_json_file(windows_terminal_config_path, &wt_config_content)
+        .with_context(|| format!("Could not write Windows Terminal settings file `{:#?}`!", windows_terminal_config_path))?;
 
     Ok(())
 }
@@ -175,36 +322,33 @@ fn pull_latest_image_tag(registry_name: &str, repository_name: &str, tag: &str, 
     Ok(())
 }
 
-fn extract_image_details(image_url: &str) -> Result<(&str, &str, &str)> {
-    let regex = regex::Regex::new(r"(.+?)\.azurecr\.io/(.+?):(.+?)").unwrap();
-    let image_regex_captures = regex.captures(image_url)
-        .with_context(|| format!("Docker image property does not have the expected format `registry.azurecr.io/repository:tag`!"))?;
-
-    let registry_name = image_regex_captures.get(1)
-        .with_context(|| format!("Could not extract registry name from Docker image URL `{}`!", image_url))?
-        .as_str();
-    let repository_name = image_regex_captures.get(2)
-        .with_context(|| format!("Could not extract repository name from Docker image URL `{}`!", image_url))?
-        .as_str();
-    let tag = image_regex_captures.get(3)
-        .with_context(|| format!("Could not extract tag from Docker image URL `{}`!", image_url))?
-        .as_str();
-
-    Ok((registry_name, repository_name, tag))
-}
-
-fn parse_yaml_file(file_path: &PathBuf) -> Result<Value> {
+fn parse_json_file_without_comments(file_path: &PathBuf) -> Result<serde_json::Value> {
     let file_path_str = file_path.to_str().unwrap();
+    debug!("Attempting to parse json file `{}` (comments will be removed).", file_path_str);
 
-    debug!("Attempting to parse yaml file `{}`.", file_path_str);
+    let file_content_str = std::fs::read_to_string(file_path)
+        .with_context(|| format!("Could not read json file `{}`", file_path_str))?;
 
-    let file = File::open(file_path)
-        .with_context(|| format!("Could not open file `{}`", file_path_str))?;
-    let file_reader = BufReader::new(file);
-    let file_content: Value = serde_yaml::from_reader(file_reader).with_context(|| "Could not parse yaml file!")?;
+    let file_reader = StripComments::new(file_content_str.as_bytes());
+    let file_content: serde_json::Value = serde_json::from_reader(file_reader).with_context(|| "Could not parse json file!")?;
 
     debug!("File `{}` was parsed successfully!", file_path_str);
     Ok(file_content)
+}
+
+fn write_json_file(file_path: &PathBuf, json_content: &serde_json::Value) -> Result<()> {
+    let file_path_str = file_path.to_str().unwrap();
+    debug!("Attempting to write to json file `{}`.", file_path_str);
+
+    debug!("{:#?}",json_content); 
+
+    let file =  OpenOptions::new().write(true).truncate(true).create(true).open(file_path)
+        .with_context(|| format!("Could not open json file `{}` for writing!", file_path_str))?;
+    let file_writer = BufWriter::new(file);
+    serde_json::to_writer_pretty(file_writer, json_content).with_context(|| format!("An error happened while writing to json file `{}`", file_path_str))?;
+
+    debug!("File `{}` was updated successfully!", file_path_str);
+    Ok(())
 }
 
 fn parse_dockerwslconf_file(file_path: &PathBuf) -> Result<DockerWSLConf> {
