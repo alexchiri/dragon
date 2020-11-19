@@ -211,7 +211,7 @@ fn handle_upgrade(upgrade: Upgrade) -> Result<()> {
         let wt_profile_guid = wsl_conf.windowsTerminalProfileId.as_ref().with_context(|| format!("Unexpected error occurred, a UUID should've been allocated for the `{}` Windows Terminal profile!", &wsl_conf.name))?;
 
         // 2. Create/Update profile in Windows Terminal settings file
-        create_windows_terminal_profile(&upgrade.wtconfig, wt_profile_guid.as_str(), &wsl_conf.name, wsl_vm_name.as_str())
+        create_windows_terminal_profile(&upgrade.wtconfig, wt_profile_guid.as_str(), &wsl_conf.name)
             .with_context(|| format!("Could not create/update windows terminal profile for WSL `{}`!", &wsl_conf.name))?;
         // 3. Update image url and profile GUID in .dockerwsl conf with the latest tag
         update_wsl_info(&upgrade.dockerwsl, &wsl_conf.name, wt_profile_guid.as_str(), latest_tag.as_str())
