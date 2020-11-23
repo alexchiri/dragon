@@ -33,9 +33,9 @@ enum SubCommand {
     /// Creates .dockerwsl entry from image url, pulls image, creates WSL VM and creates record in Windows Terminal settings.json file.
     New(New),
     /// Runs a configured and existing WSL VM by name.
-    Run(Run),
+    Run(Run)
 
-    Test(Test)
+    // Test(Test)
 }
 
 #[derive(Debug, StructOpt)]
@@ -101,8 +101,8 @@ struct Run {
 #[derive(Debug, Serialize, Deserialize)]
 struct DockerWSLConf {
     wsls: Vec<WSLConf>,
-    defaultWSLInstallLocation: Option<String>,
-    privateRegistries: Vec<Registry>
+    default_wsl_install_location: Option<String>,
+    private_registries: Vec<Registry>
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -117,12 +117,14 @@ struct WSLConf {
     name: String,
     image: String,
     latest: Option<String>,
-    windowsTerminalProfileId: Option<String>
+    windows_terminal_profile_id: String,
+    install_path: String
 }
 
 fn main() -> Result<()> {
     let dragon_params = Dragon::from_args();
-    SimpleLogger::new().with_level(dragon_params.verbose.log_level().unwrap().to_level_filter()).init();
+    SimpleLogger::new().with_level(dragon_params.verbose.log_level().unwrap().to_level_filter()).init()
+        .with_context(|| format!("Could not initialize logging!"))?;
     
     debug!("{:#?}", dragon_params);
 
@@ -147,27 +149,27 @@ fn main() -> Result<()> {
             return handle_run(run_command);
         }
 
-        SubCommand::Test(test_command) => {
-            debug!("Received a Test command: {:#?}", test_command);
-            return handle_test(test_command);
-        }
+        // SubCommand::Test(test_command) => {
+        //     debug!("Received a Test command: {:#?}", test_command);
+        //     return handle_test(test_command);
+        // }
     }
 
 }
 
-fn handle_test(test: Test) -> Result<()> {    
-    let mut wsl_run_command = Command::new(r#"wsl"#);
-    wsl_run_command.args(&["-d", "nginx-latest"]);
+// fn handle_test(test: Test) -> Result<()> {    
+//     let mut wsl_run_command = Command::new(r#"wsl"#);
+//     wsl_run_command.args(&["-d", "nginx-latest"]);
 
-    let wsl_run_command_status = wsl_run_command.status()
-        .with_context(|| format!("`wsl -d nginx-latest` failed!"))?;
+//     let wsl_run_command_status = wsl_run_command.status()
+//         .with_context(|| format!("`wsl -d nginx-latest` failed!"))?;
 
-    if !wsl_run_command_status.success() {
-        return Err(anyhow::anyhow!("Could not run WSL VM `nginx-latest`!"));
-    }
+//     if !wsl_run_command_status.success() {
+//         return Err(anyhow::anyhow!("Could not run WSL VM `nginx-latest`!"));
+//     }
     
-    Ok(())
-}
+//     Ok(())
+// }
 
 fn handle_run(run: Run) -> Result<()> {
     let dockerwsl_path = &run.dockerwsl;
@@ -184,7 +186,8 @@ fn handle_run(run: Run) -> Result<()> {
     let wsl_conf = wslconf_option.unwrap();
     let image_url_string = &wsl_conf.image;
 
-    let (_registry_name, _repository_name, tag) = extract_generic_image_details(image_url_string.as_str())?;
+    let (_registry_name, _repository_name, tag) = extract_generic_image_details(image_url_string.as_str())
+        .with_context(|| format!("Could not extract Docker image details from URL `{}`!", image_url_string))?;
 
     if tag.is_none() {
         return Err(anyhow::anyhow!("Could not find image tag in image URL `{}` in .dockerwsl file for WSL `{}`!", image_url_string, wsl_name));
@@ -232,12 +235,11 @@ fn wsl_vm_exists(wsl_name: &str) -> Result<bool> {
 }
 
 fn handle_new(new: New) -> Result<()> {
-    debug!("{:#?}", new); 
-
     let mut image_url = new.image;
-    let (registry_name, repository_name, tag) = extract_generic_image_details(image_url.as_str())?;
+    let (registry_name_option, repository_name, tag_option) = extract_generic_image_details(image_url.as_str())
+        .with_context(|| format!("Could not extract Docker image details from URL `{}`!", image_url.as_str()))?;
 
-    if tag.is_none() {
+    if tag_option.is_none() {
         image_url = format!("{}:latest", image_url);
     }
 
@@ -246,18 +248,44 @@ fn handle_new(new: New) -> Result<()> {
 
     let wt_profile_id = uuid::Uuid::new_v4().to_hyphenated().to_string();
 
-    create_dockerwsl_config_entry(&new.dockerwsl, image_url.as_str(), wsl_name_str, wt_profile_id.as_str())
+    let dockerwsl_path = &new.dockerwsl;
+
+    handle_pull_for_image(registry_name_option, dockerwsl_path, image_url.as_str())
+        .with_context(|| format!("Could not handle pull for image `{}`!", image_url.as_str()))?;
+
+    let tag = tag_option.unwrap_or("latest".to_string());
+    let wsl_vm_name = get_wsl_wm_name(repository_name.as_str(), tag.as_str())
+        .with_context(|| format!("Could not compose WSL VM name from WSL name and tag!"))?;
+    let wsl_vm_name_str = wsl_vm_name.as_str();
+
+    let install_path = determine_install_path(&new.install_location, dockerwsl_path, wsl_vm_name_str)
+        .with_context(|| format!("Could not determine install location for WSL VM `{}`!", wsl_vm_name_str))?;
+
+    let temp_dir = Builder::new().prefix("dragon").tempdir()?;
+    let tar_path = export_docker_image_to_tar(image_url.as_str(), &temp_dir)
+        .with_context(|| format!("Could not export docker image `{}` to tar file!", image_url.as_str()))?;
+
+    create_wsl_vm_from_tar(wsl_vm_name_str, &tar_path, &install_path)
+        .with_context(|| format!("Could not create WSL VM with name `{}`", wsl_vm_name_str))?;
+
+    create_dockerwsl_config_entry(dockerwsl_path, image_url.as_str(), wsl_name_str, wt_profile_id.as_str(), &install_path, tag.as_str())
         .with_context(|| format!("Could not create the .dockerwsl config entry for the `{}` entry!", wsl_name_str))?;
 
-    if registry_name.is_some() {
-        let dockerwsl_path = &new.dockerwsl;
+    create_windows_terminal_profile(&new.wtconfig, wt_profile_id.as_str(), wsl_name_str)
+        .with_context(|| format!("Could not create Windows Terminal profile in settings.json for `{}`!", wsl_name_str))?;
+
+    Ok(())
+}
+
+fn determine_login(registry_name_option: Option<String>, dockerwsl_path: &PathBuf) -> Result<()> {
+    if registry_name_option.is_some() {
         let dockerwsl_content = get_dockerwsl_content(dockerwsl_path)
             .with_context(|| format!("Could not parse `.dockerwsl` config file `{:#?}`!", &dockerwsl_path))?;
         
-        let registry_name_string = registry_name.unwrap();
+        let registry_name_string = registry_name_option.unwrap();
         let registry_name_str = registry_name_string.as_str();
 
-        let private_registry_option = dockerwsl_content.privateRegistries.iter().find(|reg| reg.name.as_str() == registry_name_str);
+        let private_registry_option = dockerwsl_content.private_registries.iter().find(|reg| reg.name.as_str() == registry_name_str);
 
         if private_registry_option.is_some() {
             let private_registry = private_registry_option.unwrap();
@@ -270,26 +298,6 @@ fn handle_new(new: New) -> Result<()> {
         }
     }
 
-    pull_image_tag(image_url.as_str())
-        .with_context(|| format!("Could not pull the image {}!", image_url.as_str()))?;
-
-    let wsl_vm_name = get_wsl_wm_name(repository_name.as_str(), tag.unwrap_or("latest".to_string()).as_str())
-        .with_context(|| format!("Could not compose WSL VM name from WSL name and tag!"))?;
-    let wsl_vm_name_str = wsl_vm_name.as_str();
-
-    let install_path = determine_install_path(&new.install_location, &new.dockerwsl, wsl_vm_name_str)
-        .with_context(|| format!("Could not determine install location for WSL VM `{}`!", wsl_vm_name_str))?;
-
-    let temp_dir = Builder::new().prefix("dragon").tempdir()?;
-    let tar_path = export_docker_image_to_tar(image_url.as_str(), &temp_dir)
-        .with_context(|| format!("Could not export docker image `{}` to tar file!", image_url.as_str()))?;
-
-    create_wsl_vm_from_tar(wsl_vm_name_str, &tar_path, &install_path)
-        .with_context(|| format!("Could not create WSL VM with name `{}`", wsl_vm_name_str))?;
-
-    create_windows_terminal_profile(&new.wtconfig, wt_profile_id.as_str(), wsl_name_str)
-        .with_context(|| format!("Could not create Windows Terminal profile in settings.json for `{}`!", wsl_name_str))?;
-
     Ok(())
 }
 
@@ -297,15 +305,15 @@ fn determine_install_path(new_install_location: &Option<PathBuf>, dockerwsl_path
     if new_install_location.is_none() {
         let dockerwsl_content = get_dockerwsl_content(dockerwsl_path)
             .with_context(|| format!("Could not parse `.dockerwsl` config file `{:#?}`!", dockerwsl_path))?;
-        if dockerwsl_content.defaultWSLInstallLocation.is_none() {
-            return Err(anyhow::anyhow!("No install location was passed and no `defaultWSLInstallLocation` value is defined in .dockerwsl file!"));
+        if dockerwsl_content.default_wsl_install_location.is_none() {
+            return Err(anyhow::anyhow!("No install location was passed and no `default_wsl_install_location` value is defined in .dockerwsl file!"));
         } else {
-            let parent_folder_wsl_path = PathBuf::from(dockerwsl_content.defaultWSLInstallLocation.unwrap());
+            let parent_folder_wsl_path = PathBuf::from(dockerwsl_content.default_wsl_install_location.unwrap());
             let wsl_path = parent_folder_wsl_path.join(wsl_vm_name_str);
             return Ok(wsl_path);
         }
     } else {
-        return Ok(new_install_location.clone().unwrap());
+        return Ok(new_install_location.clone().unwrap().join(wsl_vm_name_str));
     }
 }
 
@@ -363,7 +371,7 @@ fn docker_export(docker_container_id: &str, tar_file_path: &PathBuf) -> Result<(
     Ok(())
 }
 
-fn create_dockerwsl_config_entry(dockerwsl_path: &PathBuf, image_url: &str, wsl_name: &str, wt_profile_id: &str) -> Result<()> {
+fn create_dockerwsl_config_entry(dockerwsl_path: &PathBuf, image_url: &str, wsl_name: &str, wt_profile_id: &str, install_path: &PathBuf, latest_tag_str: &str) -> Result<()> {
     let mut dockerwsl_content = get_dockerwsl_content(&dockerwsl_path)
         .with_context(|| format!("Could not parse `.dockerwsl` config file `{:#?}`!", &dockerwsl_path))?;
 
@@ -373,11 +381,14 @@ fn create_dockerwsl_config_entry(dockerwsl_path: &PathBuf, image_url: &str, wsl_
         return Err(anyhow::anyhow!("There is already a dockerwsl config with the name `{}`!", wsl_name));
     }
 
+    let install_path_str = install_path.to_str().with_context(|| format!("Could not convert install path to &str!"))?;
+
     let wslconf = WSLConf {
         name: wsl_name.to_string(),
         image: image_url.to_string(),
-        latest: None,
-        windowsTerminalProfileId: Option::from(wt_profile_id.to_string())
+        latest: Some(latest_tag_str.to_string()),
+        install_path: format!("{}", install_path_str),
+        windows_terminal_profile_id: wt_profile_id.to_string()
     };
 
     dockerwsl_content.wsls.insert(0, wslconf);
@@ -403,7 +414,7 @@ fn extract_generic_image_details(image_url: &str) -> Result<(Option<String>, Str
 }
 
 fn handle_pull(pull: Pull) -> Result<()> {
-    let dockerwsl_path = pull.dockerwsl;
+    let dockerwsl_path = &pull.dockerwsl;
     let wsl_name = &pull.wsl;
     
     let dockerwsl_content = parse_dockerwslconf_file(&dockerwsl_path)
@@ -424,8 +435,11 @@ fn handle_pull(pull: Pull) -> Result<()> {
 
         let image_url_str = wsl_conf.image.as_str();
 
-        pull_image_tag(image_url_str)
-            .with_context(|| format!("Could not pull the image {}!", image_url_str))?;
+        let (registry_name, _repository_name, _tag) = extract_generic_image_details(image_url_str)
+            .with_context(|| format!("Could not extract Docker image details from URL `{}`!", image_url_str))?;
+
+        handle_pull_for_image(registry_name, dockerwsl_path, image_url_str)
+            .with_context(|| format!("Could not handle pull for image `{}`!", image_url_str))?;
     }
    
     Ok(())
@@ -448,68 +462,89 @@ fn handle_pull(pull: Pull) -> Result<()> {
 //     Ok(latest_tag)
 // }
 
+fn handle_pull_for_image(registry_name_option:Option<String>, dockerwsl_path:&PathBuf, image_url_str: &str) -> Result<()> {
+    determine_login(registry_name_option, dockerwsl_path)
+        .with_context(|| format!("Error occurred while determining if login is required for pulling docker image `{}`!", image_url_str))?;
+
+    pull_image_tag(image_url_str)
+        .with_context(|| format!("Could not pull the image {}!", image_url_str))?;
+    
+    Ok(())
+}
+
 fn handle_upgrade(upgrade: Upgrade) -> Result<()> {
-    // let mut dockerwsl_content = parse_dockerwslconf_file(&upgrade.dockerwsl)
-    //     .with_context(|| format!("Could not parse `.dockerwsl` config file `{:#?}`!", &upgrade.dockerwsl))?;
+    let mut dockerwsl_content = parse_dockerwslconf_file(&upgrade.dockerwsl)
+        .with_context(|| format!("Could not parse `.dockerwsl` config file `{:#?}`!", &upgrade.dockerwsl))?;
 
-    // let upgrade_wsl = &upgrade.wsl;
-    // let acr_conf = &dockerwsl_content.acr;
+    let upgrade_wsl = &upgrade.wsl;
 
-    // for mut wsl_conf in dockerwsl_content.wsls.iter_mut() {
-    //     match upgrade_wsl {
-    //         Some(name) => {
-    //             if name.ne(&wsl_conf.name) {
-    //                 debug!("Passed wsl name (`{}`) doesn't match current config entry name, will SKIP it!", &name);
-    //                 continue;
-    //             } else {
-    //                 debug!("Passed wsl name (`{}`) matches current config entry name, will process it!", &name);
-    //             }
-    //         },
-    //         None => { debug!("No wsl name passed to `upgrade`, will upgrade all wsls in the config file!"); }
-    //     }
+    for wsl_conf in dockerwsl_content.wsls.iter_mut() {
+        match upgrade_wsl {
+            Some(name) => {
+                if name.ne(&wsl_conf.name) {
+                    debug!("Passed wsl name (`{}`) doesn't match current config entry name, will SKIP it!", &name);
+                    continue;
+                } else {
+                    debug!("Passed wsl name (`{}`) matches current config entry name, will process it!", &name);
+                }
+            },
+            None => { debug!("No wsl name passed to `upgrade`, will upgrade all wsls in the config file!"); }
+        }
 
-    //     let (registry_name, repository_name, tag) = extract_image_details(&wsl_conf.image).unwrap();
+        let (registry_name, repository_name, tag) = extract_generic_image_details(&wsl_conf.image)
+            .with_context(|| format!("Could not extract Docker image details from URL `{}`!", &wsl_conf.image))?;
 
-    //     if wsl_conf.latest.is_none() {
-    //         handle_pull_for_image(registry_name.as_str(), 
-    //             repository_name.as_str(), 
-    //             acr_conf.username.as_str(), 
-    //             acr_conf.password.as_str(), 
-    //             acr_conf.tenant.as_str(), 
-    //             wsl_conf).with_context(|| format!("Could not handle pull for WSL `{}`!", &wsl_conf.name))?;
-    //     } 
+        if wsl_conf.latest.is_none() {
+            return Err(anyhow::anyhow!("There is no latest property in .dockerwsl for WSL `{}`! Either add the value manually or for images in ACR use `dragon update`.", &wsl_conf.name));
+        } 
 
-    //     let latest_tag = wsl_conf.latest.as_ref().unwrap();
-    //     // Steps
-    //     // 1. Create/Check if WSL VM with name_latest_tag exists
-    //     create_wsl_vm(registry_name.as_str(), repository_name.as_str(), &wsl_conf.name, latest_tag.as_str())
-    //         .with_context(|| format!("Could not create WSL VM for WSL `{}` and tag `{}`", &wsl_conf.name, &tag))?;
+        let latest_tag = wsl_conf.latest.as_ref().unwrap();
+        let updated_image_url = update_image_url(registry_name, &repository_name, latest_tag)
+            .with_context(|| format!("Could not update image URL `{}` with the latest tag `{}`!", &wsl_conf.image, latest_tag))?;
 
-    //     if wsl_conf.windowsTerminalProfileId.is_none() {
-    //         wsl_conf.windowsTerminalProfileId = Option::from(uuid::Uuid::new_v4().to_hyphenated().to_string());
-    //     }
+        let wsl_vm_name = get_wsl_wm_name(repository_name.as_str(), latest_tag)
+            .with_context(|| format!("Could not compose WSL VM name from WSL name and tag!"))?;
+        let wsl_vm_name_str = wsl_vm_name.as_str();
 
-    //     let wt_profile_guid = wsl_conf.windowsTerminalProfileId.as_ref().with_context(|| format!("Unexpected error occurred, a UUID should've been allocated for the `{}` Windows Terminal profile!", &wsl_conf.name))?;
+        let temp_dir = Builder::new().prefix("dragon").tempdir()?;
+        let tar_path = export_docker_image_to_tar(updated_image_url.as_str(), &temp_dir)
+            .with_context(|| format!("Could not export docker image `{}` to tar file!", updated_image_url.as_str()))?;
 
-    //     // 2. Create/Update profile in Windows Terminal settings file
-    //     create_windows_terminal_profile(&upgrade.wtconfig, wt_profile_guid.as_str(), &wsl_conf.name)
-    //         .with_context(|| format!("Could not create/update windows terminal profile for WSL `{}`!", &wsl_conf.name))?;
-    //     // 3. Update image url and profile GUID in .dockerwsl conf with the latest tag
-    //     update_wsl_info(&upgrade.dockerwsl, &wsl_conf.name, wt_profile_guid.as_str(), latest_tag.as_str())
-    //         .with_context(|| format!("Could not update WSL information after upgrading WSL `{}`", &wsl_conf.name))?;
-    //     //  debug!("{:#?}",az_login_command_status); 
-    // }
+        // if tag.is_some() {
+        //     let old_wsl_vm_name = get_wsl_wm_name(repository_name.as_str(), tag.unwrap().as_str())
+        //         .with_context(|| format!("Could not compose WSL VM name from WSL name and tag!"))?;
+        //     let old_wsl_wm_name_str = old_wsl_vm_name.as_str();
+        //     let wsl_wm_exists_bool = wsl_vm_exists(old_wsl_wm_name_str)
+        //         .with_context(|| format!("Could not verify if WSL VM `{}` already exists!", old_wsl_wm_name_str))?;
 
-    // write_dockerwsl_file(&upgrade.dockerwsl, &dockerwsl_content)
-    //     .with_context(|| format!("An error occurred while writing to the .dockerwsl file the updates from the pull subcommand!"))?;
+        //     if wsl_wm_exists_bool {
+        //         delete_wsl_vm(old_wsl_wm_name_str)
+        //             .with_context(|| format!("Could not existing WSL VM `{}`!", old_wsl_wm_name_str))?;
+        //     }
+        // }
+
+        create_wsl_vm_from_tar(wsl_vm_name_str, &tar_path, &PathBuf::from(&wsl_conf.install_path))
+            .with_context(|| format!("Could not create WSL VM with name `{}`", wsl_vm_name_str))?;
+
+        create_windows_terminal_profile(&upgrade.wtconfig, wsl_conf.windows_terminal_profile_id.as_str(), &wsl_conf.name)
+            .with_context(|| format!("Could not create Windows Terminal profile in settings.json for `{}`!", &wsl_conf.name))?;
+
+        wsl_conf.image = updated_image_url;
+    }
+
+    write_dockerwsl_file(&upgrade.dockerwsl, &dockerwsl_content)
+        .with_context(|| format!("An error occurred while writing to the .dockerwsl file the updates from the pull subcommand!"))?;
 
     
     Ok(())
 }
 
-fn update_wsl_info(dockerwsl_path: &PathBuf, wsl_name: &str, wt_profile_guid: &str, latest_tag: &str) -> Result<()> {
-    
-    Ok(())
+fn update_image_url(registry_name_option: Option<String>, repository_name_str:&String, latest_tag_str: &str) -> Result<String> {
+    if registry_name_option.is_none() {
+        return Ok(format!("{}:{}", repository_name_str, latest_tag_str));
+    } else {
+        return Ok(format!("{}/{}:{}", registry_name_option.unwrap(), repository_name_str, latest_tag_str));
+    }
 }
 
 fn delete_wsl_vm(wsl_vm_name_str: &str) -> Result<()> {
@@ -571,6 +606,8 @@ fn create_windows_terminal_profile(windows_terminal_config_path: &PathBuf, wt_pr
 
     let wt_profiles_list_array = wt_profiles_list.as_array_mut()
         .with_context(|| format!("Syntax incorrect for `profiles.list` array property in Windows Terminal settings file `{:#?}`", windows_terminal_config_path))?;
+    
+    let wt_profile_guid_with_braces = format!("{{{ }}}", wt_profile_guid);
 
     let wt_profiles_list_array_filter = |profile: &&mut serde_json::Value| {
         let profile_object = profile.as_object();
@@ -579,7 +616,7 @@ fn create_windows_terminal_profile(windows_terminal_config_path: &PathBuf, wt_pr
                 let guid = p_obj.get("guid");
                 match guid {
                     Some(guid_value) => {
-                        if guid_value.is_string() && guid_value.as_str().unwrap() == wt_profile_guid {
+                        if guid_value.is_string() && guid_value.as_str().unwrap() == wt_profile_guid_with_braces {
                             return true;
                         } else {
                             return false;
@@ -681,8 +718,8 @@ fn get_dockerwsl_content(file_path: &PathBuf) -> Result<DockerWSLConf> {
     } else {
         return Ok(DockerWSLConf {
             wsls: vec![],
-            defaultWSLInstallLocation: None,
-            privateRegistries: vec![]
+            default_wsl_install_location: None,
+            private_registries: vec![]
         });
     }
 }
@@ -707,7 +744,7 @@ fn write_dockerwsl_file(file_path: &PathBuf, dockerwsl_conf: &DockerWSLConf) -> 
 
     debug!("{:#?}",dockerwsl_conf); 
 
-    let file =  OpenOptions::new().write(true).open(file_path)
+    let file =  OpenOptions::new().write(true).truncate(true).create(true).open(file_path)
         .with_context(|| format!("Could not open .dockerwsl file `{}` for writing!", file_path_str))?;
     let file_writer = BufWriter::new(file);
     serde_yaml::to_writer(file_writer, dockerwsl_conf).with_context(|| format!("An error happened while writing .dockerwsl file to `{}`", file_path_str))?;
