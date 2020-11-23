@@ -32,6 +32,8 @@ enum SubCommand {
     Upgrade(Upgrade),
     /// Creates .dockerwsl entry from image url, pulls image, creates WSL VM and creates record in Windows Terminal settings.json file.
     New(New),
+    /// Runs a configured and existing WSL VM by name.
+    Run(Run),
 
     Test(Test)
 }
@@ -94,6 +96,17 @@ struct Test {
     #[structopt(short = "w", long)]
     wsl: Option<String>,
 }
+
+#[derive(Debug, StructOpt)]
+struct Run {
+    /// Path to the .dockerwsl file. Mandatory.
+    #[structopt(short = "c", long, parse(from_os_str), env="DOCKERWSL_PATH")]
+    dockerwsl: PathBuf,
+    /// Which WSL VM would you like to run? Provide its name as configured in .dockerwsl. Mandatory.
+    #[structopt(short = "w", long)]
+    wsl: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct DockerWSLConf {
     wsls: Vec<WSLConf>,
@@ -138,6 +151,11 @@ fn main() -> Result<()> {
             return handle_new(new_command);
         }
 
+        SubCommand::Run(run_command) => {
+            debug!("Received a Run command: {:#?}", run_command);
+            return handle_run(run_command);
+        }
+
         SubCommand::Test(test_command) => {
             debug!("Received a Test command: {:#?}", test_command);
             return handle_test(test_command);
@@ -151,6 +169,48 @@ fn handle_test(test: Test) -> Result<()> {
     
     
     Ok(())
+}
+
+fn handle_run(run: Run) -> Result<()> {
+    let dockerwsl_path = &run.dockerwsl;
+    let dockerwsl_content = get_dockerwsl_content(dockerwsl_path)
+        .with_context(|| format!("Could not parse `.dockerwsl` config file `{:#?}`!", &dockerwsl_path))?;
+    let wsl_name = &run.wsl;
+
+    let wslconf_option = dockerwsl_content.wsls.iter().find(|wsl| wsl.name == wsl_name.as_str());
+
+    if wslconf_option.is_none() {
+        return Err(anyhow::anyhow!("Could not find .dockerwsl config with name `{}`!", wsl_name));
+    } 
+
+    let wsl_conf = wslconf_option.unwrap();
+    let image_url_string = &wsl_conf.image;
+
+    let (_registry_name, _repository_name, tag) = extract_generic_image_details(image_url_string.as_str())?;
+
+    if tag.is_none() {
+        return Err(anyhow::anyhow!("Could not find image tag in image URL `{}` in .dockerwsl file for WSL `{}`!", image_url_string, wsl_name));
+    }
+
+    let tag_str = tag.unwrap();
+    let wsl_vm_name = get_wsl_wm_name(wsl_name.as_str(), tag_str.as_str())
+        .with_context(|| format!("Could not compose WSL VM name from WSL name and tag!"))?;
+
+    let mut wsl_run_command = Command::new(r#"wsl"#);
+    wsl_run_command.args(&["-d", &wsl_vm_name]);
+
+    let wsl_run_command_status = wsl_run_command.status()
+        .with_context(|| format!("`wsl -d {}` failed!", &wsl_vm_name))?;
+
+    if !wsl_run_command_status.success() {
+        return Err(anyhow::anyhow!("Could not run WSL VM `{}`!", wsl_vm_name));
+    }
+    
+    Ok(())
+}
+
+fn get_wsl_wm_name(wsl_name: &str, tag: &str) -> Result<String> {
+    return Ok(format!("{}-{}", wsl_name, tag));
 }
 
 fn wsl_vm_exists(wsl_name: &str) -> Result<bool> {
@@ -215,7 +275,8 @@ fn handle_new(new: New) -> Result<()> {
     pull_image_tag(image_url.as_str())
         .with_context(|| format!("Could not pull the latest tag of the image "))?;
 
-    let wsl_vm_name = format!("{}-{}", repository_name, tag.unwrap_or("latest".to_string()));
+    let wsl_vm_name = get_wsl_wm_name(repository_name.as_str(), tag.unwrap_or("latest".to_string()).as_str())
+        .with_context(|| format!("Could not compose WSL VM name from WSL name and tag!"))?;
     let wsl_vm_name_str = wsl_vm_name.as_str();
 
     let install_path = determine_install_path(&new.install_location, &new.dockerwsl, wsl_vm_name_str)
