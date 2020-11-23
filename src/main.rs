@@ -85,16 +85,7 @@ struct New {
 
 #[derive(Debug, StructOpt)]
 struct Test {
-    /// Path to the .dockerwsl file. Mandatory.
-    #[structopt(short = "c", long, parse(from_os_str), env="DOCKERWSL_PATH")]
-    dockerwsl: PathBuf,
-    /// Path to the Windows Terminal configuration file. Mandatory.
-    #[structopt(short = "t", long, parse(from_os_str), env="WT_SETTINGS_PATH")]
-    wtconfig: PathBuf,
-    /// Which WSL VM would you like to change? Provide its name as configured in .dockerwsl.
-    /// Optional, if not provided, all WSLs are gonna be affected. 
-    #[structopt(short = "w", long)]
-    wsl: Option<String>,
+    
 }
 
 #[derive(Debug, StructOpt)]
@@ -164,9 +155,16 @@ fn main() -> Result<()> {
 
 }
 
-fn handle_test(test: Test) -> Result<()> {
-    wsl_vm_exists("basic")?;
-    
+fn handle_test(test: Test) -> Result<()> {    
+    let mut wsl_run_command = Command::new(r#"wsl"#);
+    wsl_run_command.args(&["-d", "nginx-latest"]);
+
+    let wsl_run_command_status = wsl_run_command.status()
+        .with_context(|| format!("`wsl -d nginx-latest` failed!"))?;
+
+    if !wsl_run_command_status.success() {
+        return Err(anyhow::anyhow!("Could not run WSL VM `nginx-latest`!"));
+    }
     
     Ok(())
 }
@@ -632,7 +630,7 @@ fn create_windows_terminal_profile(windows_terminal_config_path: &PathBuf, wt_pr
                 "guid": format!("{{{}}}", wt_profile_guid),
                 "hidden": false,
                 "name": wsl_name,
-                "commandLine": format!("dragon run -w {}", wsl_name)
+                "commandline": format!("dragon run -w {}", wsl_name)
             });
 
             wt_profiles_list_array.insert(0, profile_object);
