@@ -271,7 +271,7 @@ fn handle_new(new: New) -> Result<()> {
     }
 
     pull_image_tag(image_url.as_str())
-        .with_context(|| format!("Could not pull the latest tag of the image "))?;
+        .with_context(|| format!("Could not pull the image {}!", image_url.as_str()))?;
 
     let wsl_vm_name = get_wsl_wm_name(repository_name.as_str(), tag.unwrap_or("latest".to_string()).as_str())
         .with_context(|| format!("Could not compose WSL VM name from WSL name and tag!"))?;
@@ -403,62 +403,34 @@ fn extract_generic_image_details(image_url: &str) -> Result<(Option<String>, Str
 }
 
 fn handle_pull(pull: Pull) -> Result<()> {
-    // let dockerwsl_path = pull.dockerwsl;
+    let dockerwsl_path = pull.dockerwsl;
+    let wsl_name = &pull.wsl;
     
-    // let mut dockerwsl_content = parse_dockerwslconf_file(&dockerwsl_path)
-    //     .with_context(|| format!("Could not parse `.dockerwsl` config file `{:#?}`!", &dockerwsl_path))?;
+    let dockerwsl_content = parse_dockerwslconf_file(&dockerwsl_path)
+        .with_context(|| format!("Could not parse `.dockerwsl` config file `{:#?}`!", &dockerwsl_path))?;
 
-    // let pull_wsl = &pull.wsl;
-    // let acr_conf = &dockerwsl_content.acr;
+    for wsl_conf in dockerwsl_content.wsls.iter() {
+        match wsl_name {
+            Some(name) => {
+                if name.ne(&wsl_conf.name) {
+                    debug!("Passed wsl name (`{}`) doesn't match current config entry name, will SKIP it!", &name);
+                    continue;
+                } else {
+                    debug!("Passed wsl name (`{}`) matches current config entry name, will process it!", &name);
+                }
+            },
+            None => { debug!("No wsl name passed to `upgrade`, will upgrade all wsls in the config file!"); }
+        }
 
-    // for wsl_conf in dockerwsl_content.wsls.iter_mut() {
-    //     match pull_wsl {
-    //         Some(name) => {
-    //             if name.ne(&wsl_conf.name) {
-    //                 debug!("Passed wsl name (`{}`) doesn't match current config entry name, will SKIP it!", &name);
-    //                 continue;
-    //             } else {
-    //                 debug!("Passed wsl name (`{}`) matches current config entry name, will process it!", &name);
-    //             }
-    //         },
-    //         None => { debug!("No wsl name passed to `pull`, will pull all wsls in the config file!"); }
-    //     }
+        let image_url_str = wsl_conf.image.as_str();
 
-    //     let (registry_name, repository_name, tag) = extract_image_details(wsl_conf.image.as_str()).unwrap();
-
-    //     handle_pull_for_image(registry_name.as_str(), 
-    //                           repository_name.as_str(), 
-    //                           acr_conf.username.as_str(), 
-    //                           acr_conf.password.as_str(), 
-    //                           acr_conf.tenant.as_str(), 
-    //                           wsl_conf).with_context(|| format!("Could not handle pull for WSL `{}`!", &wsl_conf.name))?;
-        
-    //     //  debug!("{:#?}",az_login_command_status); 
-    // }
-
-    // write_dockerwsl_file(&dockerwsl_path, &dockerwsl_content)
-    //     .with_context(|| format!("An error occurred while writing to the .dockerwsl file the updates from the pull subcommand!"))?;
-
+        pull_image_tag(image_url_str)
+            .with_context(|| format!("Could not pull the image {}!", image_url_str))?;
+    }
+   
     Ok(())
 }
 
-fn extract_image_details(image_url: &str) -> Result<(String, String, String)> {
-    let regex = regex::Regex::new(r"(.+?)\.azurecr\.io/(.+?):(.+?)").unwrap();
-    let image_regex_captures = regex.captures(image_url)
-        .with_context(|| format!("Docker image property does not have the expected format `registry.azurecr.io/repository:tag`!"))?;
-
-    let registry_name = image_regex_captures.get(1)
-        .with_context(|| format!("Could not extract registry name from Docker image URL `{}`!", image_url))?
-        .as_str();
-    let repository_name = image_regex_captures.get(2)
-        .with_context(|| format!("Could not extract repository name from Docker image URL `{}`!", image_url))?
-        .as_str();
-    let tag = image_regex_captures.get(3)
-        .with_context(|| format!("Could not extract tag from Docker image URL `{}`!", image_url))?
-        .as_str();
-
-    Ok((String::from(registry_name), String::from(repository_name), String::from(tag)))
-}
 
 // fn handle_pull_for_image(registry_name: &str, repository_name: &str, username: &str, password: &str, tenant: &str, wsl_conf: &mut WSLConf) -> Result<String> {
 //     let latest_tag = get_latest_tag(registry_name, repository_name, username, password, tenant)
