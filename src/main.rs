@@ -1,5 +1,5 @@
 use std::path::{PathBuf, Path};
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, create_dir_all};
 use std::io::{BufReader, BufWriter};
 use std::process::Command;
 
@@ -77,10 +77,10 @@ struct New {
     /// Optional, if not provided, repository name will be used
     #[structopt(short = "n", long)]
     name: Option<String>,
-    /// Path to the folder where the WSL VM will be created.
-    /// Optional, but only if `defaultWSLInstallLocation` is configured in `.dockerwsl` file
+    /// Path to the folder where the WSL VMs folders will be created for this particular WSL.
+    /// Optional, but only if `default_base_wsl_install_path` is configured in `.dockerwsl` file
     #[structopt(short = "l", long = "install-location", parse(from_os_str))]
-    install_location: Option<PathBuf>
+    base_install_path: Option<PathBuf>
 }
 
 #[derive(Debug, StructOpt)]
@@ -101,7 +101,7 @@ struct Run {
 #[derive(Debug, Serialize, Deserialize)]
 struct DockerWSLConf {
     wsls: Vec<WSLConf>,
-    default_wsl_install_location: Option<String>,
+    default_base_wsl_install_path: Option<String>,
     private_registries: Vec<Registry>
 }
 
@@ -118,7 +118,7 @@ struct WSLConf {
     image: String,
     latest: Option<String>,
     windows_terminal_profile_id: String,
-    install_path: String
+    base_install_path: String
 }
 
 fn main() -> Result<()> {
@@ -258,17 +258,17 @@ fn handle_new(new: New) -> Result<()> {
         .with_context(|| format!("Could not compose WSL VM name from WSL name and tag!"))?;
     let wsl_vm_name_str = wsl_vm_name.as_str();
 
-    let install_path = determine_install_path(&new.install_location, dockerwsl_path, wsl_vm_name_str)
-        .with_context(|| format!("Could not determine install location for WSL VM `{}`!", wsl_vm_name_str))?;
+    let base_install_path = determine_base_install_path(&new.base_install_path, dockerwsl_path, wsl_name_str)
+        .with_context(|| format!("Could not determine base install path for WSL VM `{}`!", wsl_vm_name_str))?;
 
     let temp_dir = Builder::new().prefix("dragon").tempdir()?;
     let tar_path = export_docker_image_to_tar(image_url.as_str(), &temp_dir)
         .with_context(|| format!("Could not export docker image `{}` to tar file!", image_url.as_str()))?;
 
-    create_wsl_vm_from_tar(wsl_vm_name_str, &tar_path, &install_path)
+    create_wsl_vm_from_tar(wsl_vm_name_str, &tar_path, &base_install_path)
         .with_context(|| format!("Could not create WSL VM with name `{}`", wsl_vm_name_str))?;
 
-    create_dockerwsl_config_entry(dockerwsl_path, image_url.as_str(), wsl_name_str, wt_profile_id.as_str(), &install_path, tag.as_str())
+    create_dockerwsl_config_entry(dockerwsl_path, image_url.as_str(), wsl_name_str, wt_profile_id.as_str(), &base_install_path, tag.as_str())
         .with_context(|| format!("Could not create the .dockerwsl config entry for the `{}` entry!", wsl_name_str))?;
 
     create_windows_terminal_profile(&new.wtconfig, wt_profile_id.as_str(), wsl_name_str)
@@ -301,19 +301,19 @@ fn determine_login(registry_name_option: Option<String>, dockerwsl_path: &PathBu
     Ok(())
 }
 
-fn determine_install_path(new_install_location: &Option<PathBuf>, dockerwsl_path: &PathBuf, wsl_vm_name_str: &str) -> Result<PathBuf> {
+fn determine_base_install_path(new_install_location: &Option<PathBuf>, dockerwsl_path: &PathBuf, wsl_name_str: &str) -> Result<PathBuf> {
     if new_install_location.is_none() {
         let dockerwsl_content = get_dockerwsl_content(dockerwsl_path)
             .with_context(|| format!("Could not parse `.dockerwsl` config file `{:#?}`!", dockerwsl_path))?;
-        if dockerwsl_content.default_wsl_install_location.is_none() {
+        if dockerwsl_content.default_base_wsl_install_path.is_none() {
             return Err(anyhow::anyhow!("No install location was passed and no `default_wsl_install_location` value is defined in .dockerwsl file!"));
         } else {
-            let parent_folder_wsl_path = PathBuf::from(dockerwsl_content.default_wsl_install_location.unwrap());
-            let wsl_path = parent_folder_wsl_path.join(wsl_vm_name_str);
+            let parent_folder_wsl_path = PathBuf::from(dockerwsl_content.default_base_wsl_install_path.unwrap());
+            let wsl_path = parent_folder_wsl_path.join(wsl_name_str);
             return Ok(wsl_path);
         }
     } else {
-        return Ok(new_install_location.clone().unwrap().join(wsl_vm_name_str));
+        return Ok(new_install_location.clone().unwrap());
     }
 }
 
@@ -371,7 +371,7 @@ fn docker_export(docker_container_id: &str, tar_file_path: &PathBuf) -> Result<(
     Ok(())
 }
 
-fn create_dockerwsl_config_entry(dockerwsl_path: &PathBuf, image_url: &str, wsl_name: &str, wt_profile_id: &str, install_path: &PathBuf, latest_tag_str: &str) -> Result<()> {
+fn create_dockerwsl_config_entry(dockerwsl_path: &PathBuf, image_url: &str, wsl_name: &str, wt_profile_id: &str, base_install_path: &PathBuf, latest_tag_str: &str) -> Result<()> {
     let mut dockerwsl_content = get_dockerwsl_content(&dockerwsl_path)
         .with_context(|| format!("Could not parse `.dockerwsl` config file `{:#?}`!", &dockerwsl_path))?;
 
@@ -381,13 +381,13 @@ fn create_dockerwsl_config_entry(dockerwsl_path: &PathBuf, image_url: &str, wsl_
         return Err(anyhow::anyhow!("There is already a dockerwsl config with the name `{}`!", wsl_name));
     }
 
-    let install_path_str = install_path.to_str().with_context(|| format!("Could not convert install path to &str!"))?;
+    let base_install_path_str = base_install_path.to_str().with_context(|| format!("Could not convert install path to &str!"))?;
 
     let wslconf = WSLConf {
         name: wsl_name.to_string(),
         image: image_url.to_string(),
         latest: Some(latest_tag_str.to_string()),
-        install_path: format!("{}", install_path_str),
+        base_install_path: format!("{}", base_install_path_str),
         windows_terminal_profile_id: wt_profile_id.to_string()
     };
 
@@ -523,7 +523,7 @@ fn handle_upgrade(upgrade: Upgrade) -> Result<()> {
         //     }
         // }
 
-        create_wsl_vm_from_tar(wsl_vm_name_str, &tar_path, &PathBuf::from(&wsl_conf.install_path))
+        create_wsl_vm_from_tar(wsl_vm_name_str, &tar_path, &PathBuf::from(&wsl_conf.base_install_path))
             .with_context(|| format!("Could not create WSL VM with name `{}`", wsl_vm_name_str))?;
 
         create_windows_terminal_profile(&upgrade.wtconfig, wsl_conf.windows_terminal_profile_id.as_str(), &wsl_conf.name)
@@ -561,7 +561,7 @@ fn delete_wsl_vm(wsl_vm_name_str: &str) -> Result<()> {
     Ok(())
 }
 
-fn create_wsl_vm_from_tar(wsl_vm_name_str: &str, tar_path: &PathBuf, install_path: &PathBuf) -> Result<()> {
+fn create_wsl_vm_from_tar(wsl_vm_name_str: &str, tar_path: &PathBuf, base_install_path: &PathBuf) -> Result<()> {
     let wsl_wm_exists_bool = wsl_vm_exists(wsl_vm_name_str)
         .with_context(|| format!("Could not verify if WSL VM `{}` already exists!", wsl_vm_name_str))?;
 
@@ -572,8 +572,13 @@ fn create_wsl_vm_from_tar(wsl_vm_name_str: &str, tar_path: &PathBuf, install_pat
 
     let tar_path_str = tar_path.to_str()
         .with_context(|| format!("Could not convert path `{}` to &str!", tar_path.display()))?;
+    
+    let install_path = base_install_path.join(wsl_vm_name_str);
     let install_path_str = install_path.to_str()
         .with_context(|| format!("Could not convert path `{}` to &str!", install_path.display()))?;
+    create_dir_all(&install_path)
+        .with_context(|| format!("Could not create the full install path `{}` for WSL VM `{}`!", install_path_str, wsl_vm_name_str))?;
+    
 
     let mut wsl_import_command = Command::new(r#"wsl"#);
     wsl_import_command.arg("--import");
@@ -718,7 +723,7 @@ fn get_dockerwsl_content(file_path: &PathBuf) -> Result<DockerWSLConf> {
     } else {
         return Ok(DockerWSLConf {
             wsls: vec![],
-            default_wsl_install_location: None,
+            default_base_wsl_install_path: None,
             private_registries: vec![]
         });
     }
