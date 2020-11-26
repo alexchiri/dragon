@@ -99,6 +99,10 @@ struct Update {
     /// Path to the .dockerwsl file. Mandatory.
     #[structopt(short = "c", long, parse(from_os_str), env="DOCKERWSL_PATH")]
     dockerwsl: PathBuf,
+
+    /// Path to the az CLI. Mandatory.
+    #[structopt(short = "a", long, parse(from_os_str), env="AZ_CLI_PATH")]
+    az_cli: PathBuf,
     
     /// Which WSL VM would you like to change? Provide its name as configured in .dockerwsl.
     /// Optional, if not provided, all WSLs are gonna be affected. 
@@ -186,15 +190,13 @@ fn main() -> Result<()> {
 }
 
 // fn handle_test(test: Test) -> Result<()> {    
-//     let mut wsl_run_command = Command::new(r#"wsl"#);
-//     wsl_run_command.args(&["-d", "nginx-latest"]);
+//     let mut wsl_run_command = Command::new(r#"az.cmd"#);
+//     wsl_run_command.arg("version");
 
-//     let wsl_run_command_status = wsl_run_command.status()
-//         .with_context(|| format!("`wsl -d nginx-latest` failed!"))?;
+//     let wsl_run_command_status = wsl_run_command.output()
+//         .with_context(|| format!("`az.cmd version` failed!"))?;
 
-//     if !wsl_run_command_status.success() {
-//         return Err(anyhow::anyhow!("Could not run WSL VM `nginx-latest`!"));
-//     }
+//     println!("{:#?}", wsl_run_command_status);
     
 //     Ok(())
 // }
@@ -250,7 +252,7 @@ fn handle_update(update: Update) -> Result<()> {
                 let tenant_str = tenant.as_str();
                 let repository_name_str = repository_name.as_str();
 
-                let latest_tag = get_latest_tag(registry_name_str, repository_name_str, username_str, password_str, tenant_str)
+                let latest_tag = get_latest_tag(registry_name_str, repository_name_str, username_str, password_str, tenant_str, &update.az_cli)
                     .with_context(|| format!("Could not get latest tag for repository {}.azurecr.io/{}", registry_name_str, repository_name_str))?;
                 
                 let latest_tag_str = latest_tag.as_str();
@@ -612,6 +614,7 @@ fn handle_upgrade(upgrade: Upgrade) -> Result<()> {
 
         let (registry_name, repository_name, _tag) = extract_generic_image_details(&wsl_conf.image)
             .with_context(|| format!("Could not extract Docker image details from URL `{}`!", &wsl_conf.image))?;
+        let registry_name_option_clone = registry_name.clone();
 
         if wsl_conf.latest.is_none() {
             return Err(anyhow::anyhow!("There is no latest property in .dockerwsl for WSL `{}`! Either add the value manually or for images in ACR use `dragon update`.", &wsl_conf.name));
@@ -620,6 +623,9 @@ fn handle_upgrade(upgrade: Upgrade) -> Result<()> {
         let latest_tag = wsl_conf.latest.as_ref().unwrap();
         let updated_image_url = update_image_url(registry_name, &repository_name, latest_tag)
             .with_context(|| format!("Could not update image URL `{}` with the latest tag `{}`!", &wsl_conf.image, latest_tag))?;
+        
+        handle_pull_for_image(registry_name_option_clone, &upgrade.dockerwsl, updated_image_url.as_str())
+            .with_context(|| format!("Could not handle pull for image `{}`!", updated_image_url.as_str()))?;
 
         let wsl_vm_name = get_wsl_wm_name(repository_name.as_str(), latest_tag)
             .with_context(|| format!("Could not compose WSL VM name from WSL name and tag!"))?;
@@ -651,7 +657,8 @@ fn update_image_url(registry_name_option: Option<String>, repository_name_str:&S
     if registry_name_option.is_none() {
         return Ok(format!("{}:{}", repository_name_str, latest_tag_str));
     } else {
-        return Ok(format!("{}/{}:{}", registry_name_option.unwrap(), repository_name_str, latest_tag_str));
+        let registry_name = registry_name_option.clone().unwrap();
+        return Ok(format!("{}/{}:{}", registry_name, repository_name_str, latest_tag_str));
     }
 }
 
@@ -872,14 +879,14 @@ fn write_dockerwsl_file(file_path: &PathBuf, dockerwsl_conf: &DockerWSLConf) -> 
     Ok(())
 }
 
-fn az_login(username: &str, password: &str, tenant: &str) -> Result<()> {
-    let mut az_login_command = Command::new(r#"C:\Program Files (x86)\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"#);
+fn az_login(username: &str, password: &str, tenant: &str, az_cli_path: &PathBuf) -> Result<()> {
+    let az_cli_path_str = az_cli_path.to_str().unwrap();
+
+    let mut az_login_command = Command::new(az_cli_path_str);
     az_login_command.args(&["login", "--service-principal"])
                     .args(&["--username", username])
                     .args(&["--password", password])
                     .args(&["--tenant", tenant]);
-
-    println!("{}-{}-{}", username, password, tenant);
 
     let az_login_command_status = az_login_command.status()
         .with_context(|| format!("`az login --service-principal` failed!"))?;
@@ -890,10 +897,12 @@ fn az_login(username: &str, password: &str, tenant: &str) -> Result<()> {
     Ok(())
 }
 
-fn get_latest_tag(registry_name:&str, repository_name: &str, username: &str, password: &str, tenant: &str) -> Result<String> {
-    az_login(username, password, tenant).with_context(|| format!("There was an error while logging in to Azure!"))?;
+fn get_latest_tag(registry_name:&str, repository_name: &str, username: &str, password: &str, tenant: &str, az_cli_path: &PathBuf) -> Result<String> {
+    az_login(username, password, tenant, az_cli_path).with_context(|| format!("There was an error while logging in to Azure!"))?;
     
-    let mut az_get_latest_tag_command = Command::new(r#"C:\Program Files (x86)\Microsoft SDKs\Azure\CLI2\wbin\az.cmd"#);
+    let az_cli_path_str = az_cli_path.to_str().unwrap();
+
+    let mut az_get_latest_tag_command = Command::new(az_cli_path_str);
     az_get_latest_tag_command.args(&["acr", "repository", "show-manifests"])
                              .args(&["-n", registry_name])
                              .args(&["--repository", repository_name])
