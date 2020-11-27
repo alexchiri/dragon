@@ -17,7 +17,7 @@ main() {
 
     test -f Cargo.lock || cargo generate-lockfile
 
-    cross rustc --bin dragon --target $TARGET --release -- -C lto
+    cross rustc --bin dragon --target $TARGET --release
 
     if test -f target/$TARGET/release/hmum; then
       cp target/$TARGET/release/dragon $stage/
