@@ -4,6 +4,10 @@
 
 `dragon` is intended to be used in the context of development-environments-as-code as described in [project-dev-palace](https://github.com/alexchiri/project-dev-palace) but it can be used just as a simple tool to manage WSL VMs created from Docker containers.
 
+## Installation
+
+Go to the [Releases](https://github.com/alexchiri/dragon/releases) page and download the Windows x86_64 binary.
+
 ## Usage
 
 ![](assets/dragon_new.gif)
