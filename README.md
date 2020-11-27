@@ -21,12 +21,14 @@ For convenience, set the following environment variables:
 ## Requirements
 
 `dragon` is using several tools that need to be installed on the machine it will run on:
-    * `az` CLI is needed for `dragon update`. The path to the CLI binary needs to be passed as a parameter to the command or a `AZ_CLI_PATH` environment variable needs to be set.
-    * `wsl` CLI is used for `dragon upgrade` to list, delete and import VMs.
-    * `docker` CLI and Desktop need to be available. Used for pulling images, creating containers from images and exporting them to tars.
-    * Windows Terminal settings.json file. `dragon new` tries to create a new profile in the Windows Terminal settings file.
+    
+* `az` CLI is needed for `dragon update`. The path to the CLI binary needs to be passed as a parameter to the command or a`AZ_CLI_PATH` environment variable needs to be set.
+* `wsl` CLI is used for `dragon upgrade` to list, delete and import VMs.
+* `docker` CLI and Desktop need to be available. Used for pulling images, creating containers from images and exporting them to tars.
+* Windows Terminal settings.json file. `dragon new` tries to create a new profile in the Windows Terminal settings file.
 
 ## TODO
+
 * Implement `dragon cleanup` that deletes all WSL VMs except the last version
 * Make Windows Terminal profile creation optional.
 * `dragon remove` to delete WSLs from .dockerwsl file, WSL VMs and profile from Windows Terminal settings.json.
